@@ -369,6 +369,7 @@ pub(crate) mod pm_why_command;
 pub mod publish_command;
 #[path = "remove_command.rs"]
 pub(crate) mod remove_command;
+pub(crate) mod run_processes_shared;
 #[path = "scan_command.rs"]
 pub mod scan_command;
 #[path = "unlink_command.rs"]
@@ -379,6 +380,7 @@ pub(crate) mod update_command;
 pub mod update_interactive_command;
 #[path = "why_command.rs"]
 pub mod why_command;
+pub(crate) mod workspace_helpers;
 
 // ─── crate-local helper for param-table concatenation ────────────────────────
 // `bun_clap::parse_param!` is a real proc-macro (const `Param<Help>` literal),
