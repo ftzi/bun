@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { tmpdirSync } from "harness";
+import { tempDir } from "harness";
 import fs from "node:fs";
 import { join } from "node:path";
 
@@ -9,8 +9,8 @@ import { join } from "node:path";
 
 describe.concurrent("chown/fchown/lchown argument validation", () => {
   it("validates uid and gid to [-1, 2**32 - 1] with the argument's own name", () => {
-    const tmp = join(tmpdirSync(), "chown-args.txt");
-    fs.writeFileSync(tmp, "x");
+    using dir = tempDir("fs-chown-args", { "chown-args.txt": "x" });
+    const tmp = join(String(dir), "chown-args.txt");
     const fd = fs.openSync(tmp, "r+");
     try {
       const variants: ((uid: any, gid: any) => void)[] = [
@@ -44,8 +44,8 @@ describe.concurrent("chown/fchown/lchown argument validation", () => {
 
 describe.concurrent("utimes/futimes/lutimes argument validation", () => {
   it("rejects non-finite and non-number atime/mtime with the argument's own name", () => {
-    const tmp = join(tmpdirSync(), "utimes-args.txt");
-    fs.writeFileSync(tmp, "x");
+    using dir = tempDir("fs-utimes-args", { "utimes-args.txt": "x" });
+    const tmp = join(String(dir), "utimes-args.txt");
     const fd = fs.openSync(tmp, "r+");
     try {
       const variants: ((atime: any, mtime: any) => void)[] = [
@@ -68,10 +68,9 @@ describe.concurrent("utimes/futimes/lutimes argument validation", () => {
   });
 
   it("utimesSync follows symlinks and lutimesSync does not", () => {
-    const dir = tmpdirSync();
-    const target = join(dir, "target.txt");
-    const link = join(dir, "link");
-    fs.writeFileSync(target, "x");
+    using dir = tempDir("fs-utimes-symlink", { "target.txt": "x" });
+    const target = join(String(dir), "target.txt");
+    const link = join(String(dir), "link");
     fs.symlinkSync(target, link);
 
     const linkTime = new Date("2000-01-02T03:04:05.000Z");
