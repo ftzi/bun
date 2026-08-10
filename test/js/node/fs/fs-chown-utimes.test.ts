@@ -23,10 +23,10 @@ describe.concurrent("chown/fchown/lchown argument validation", () => {
         expect(() => call(-1, -1)).not.toThrow();
         expect(() => call(2 ** 32 - 1, 2 ** 32 - 1)).not.toThrow();
         expect(() => call(-2, 0)).toThrow(
-          RangeError('The value of "uid" is out of range. It must be >= -1 and <= 4294967295. Received -2'),
+          RangeError('The value of "uid" is out of range. It must be >= -1 && <= 4294967295. Received -2'),
         );
         expect(() => call(0, 2 ** 32)).toThrow(
-          RangeError('The value of "gid" is out of range. It must be >= -1 and <= 4294967295. Received 4294967296'),
+          RangeError('The value of "gid" is out of range. It must be >= -1 && <= 4294967295. Received 4294967296'),
         );
         expect(() => call(1.5, 0)).toThrow(
           RangeError('The value of "uid" is out of range. It must be an integer. Received 1.5'),
