@@ -307,14 +307,10 @@ impl Readable {
                     Err(_) => return Err(global.throw_out_of_memory()),
                 };
 
-                // Ownership of the mimalloc-backed buffer transfers to JSC
-                // (freed via `MarkedArrayBuffer_deallocator`).
-                jsc::MarkedArrayBuffer {
-                    buffer: jsc::ArrayBuffer::from_owned_bytes(own, jsc::JSType::Uint8Array),
-                    owns_buffer: true,
-                    pinned: false,
-                }
-                .to_node_buffer(global)
+                // Ownership of the boxed slice transfers to JSC (freed via the
+                // buffer's deallocator).
+                jsc::MarkedArrayBuffer::from_owned_bytes(own, jsc::JSType::Uint8Array)
+                    .to_node_buffer(global)
             }
             _ => Ok(JSValue::UNDEFINED),
         }

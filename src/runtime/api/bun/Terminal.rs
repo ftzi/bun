@@ -1961,11 +1961,13 @@ impl Terminal {
             return true;
         }
         v.extend_from_slice(chunk);
-        // MarkedArrayBuffer::from_bytes takes a `&mut [u8]` it will own (freed
-        // via mimalloc on the C++ side) — leak the Box and hand over the slice.
-        let bytes: &'static mut [u8] = Box::leak(v.into_boxed_slice());
-        let data = match MarkedArrayBuffer::from_bytes(bytes, jsc::JSType::Uint8Array)
-            .to_node_buffer(global_this)
+        // Ownership of the boxed slice transfers to JSC (freed via the
+        // buffer's deallocator).
+        let data = match MarkedArrayBuffer::from_owned_bytes(
+            v.into_boxed_slice(),
+            jsc::JSType::Uint8Array,
+        )
+        .to_node_buffer(global_this)
         {
             Ok(data) => data,
             // OOM / a termination request: that exception is reported by the loop.
