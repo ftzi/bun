@@ -37,6 +37,18 @@ describe("fromUrl", () => {
       expect(hostedGitInfo.fromUrl(url)).toBeNull();
     });
 
+    // The rejected aux segment is per host: another host's segment parses.
+    it.each([
+      ["https://bitbucket.org/foo/bar/raw", { type: "bitbucket", user: "foo", project: "bar" }],
+      ["https://bitbucket.org/foo/bar/archive", { type: "bitbucket", user: "foo", project: "bar" }],
+      ["https://gist.github.com/foo/feedbeef/get", { type: "gist", user: "foo", project: "feedbeef" }],
+      ["https://gist.github.com/foo/feedbeef/archive", { type: "gist", user: "foo", project: "feedbeef" }],
+      ["https://git.sr.ht/~foo/bar/get", { type: "sourcehut", user: "~foo", project: "bar" }],
+      ["https://git.sr.ht/~foo/bar/raw", { type: "sourcehut", user: "~foo", project: "bar" }],
+    ])("%s parses despite the aux segment", (url, expected) => {
+      expect(hostedGitInfo.fromUrl(url)).toMatchObject(expected);
+    });
+
     it.each([
       ["https://gist.github.com/feedbeef", null],
       ["https://gist.github.com//feedbeef", null],

@@ -1896,6 +1896,10 @@ fn opt_pack_gzip_level(m: &PackageManager) -> Option<&[u8]> {
 /// `WorkspacePackageJSONCache::get_with_path_or_exit`, this keeps pack's
 /// existing error wording and ordering (`Output::err` first, then the log
 /// printed unconditionally on parse errors), which bun-pack.test.ts asserts.
+///
+/// `'a` is unbounded: the entry lives in `workspace_package_json_cache`, so
+/// the reference is invalid once that map is mutated (`pack` removes the
+/// entry after lifecycle scripts run and immediately reloads it).
 fn load_package_json_or_exit<'a>(
     manager_ptr: *mut PackageManager,
     abs_package_json_path: &ZStr,
@@ -3087,9 +3091,11 @@ enum PackQueueOpenMode {
 /// [`PackQueueOpenMode`] for how each file is opened. Each entry is also
 /// appended to `pack_list` when provided.
 ///
-/// The loop body's only early exits are `continue` and `Global::crash()`
-/// (never returns, no unwinding), so `node.complete_one()` is called
-/// explicitly at every loop-body exit instead of via a scope guard.
+/// The loop body's early exits are `continue`, `Global::crash()`, and `?` on
+/// `AllocError`; the last two never resume (the `AllocError` becomes
+/// `PackError::OutOfMemory` and the caller exits via `out_of_memory()`), so
+/// `node.complete_one()` is called explicitly before each `continue` instead
+/// of via a scope guard.
 fn archive_pack_queue(
     ctx: &mut Context<'_>,
     queue: &mut PackQueue,
