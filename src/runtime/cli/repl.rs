@@ -581,12 +581,12 @@ enum ReplResult {
 }
 
 /// How `evaluate_to_value` reports promise rejections and interrupts.
-/// Mirrors the difference between repl.zig's evaluateAndPrint (sets `_error`
-/// on globalThis, prints a newline on interrupt) and evaluateAndCopy (does
-/// neither).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ReportMode {
+    /// `evaluate_and_print`: a rejection also sets `_error` on globalThis, and
+    /// a promise still pending after the wait prints a newline.
     Print,
+    /// `evaluate_and_copy`: neither of the above.
     Copy,
 }
 

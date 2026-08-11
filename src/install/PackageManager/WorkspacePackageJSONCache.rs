@@ -209,7 +209,7 @@ impl WorkspacePackageJSONCache {
 
     /// `get_with_path`, except read/parse failures are fatal: pending log
     /// messages and the error are printed to stderr, then the process exits.
-    pub fn get_with_path_or_exit(
+    pub(crate) fn get_with_path_or_exit(
         &mut self,
         log: &mut Log,
         abs_package_json_path: &[u8],

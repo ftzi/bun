@@ -1894,9 +1894,8 @@ fn opt_pack_gzip_level(m: &PackageManager) -> Option<&[u8]> {
 /// Reads `abs_package_json_path` through the workspace package.json cache;
 /// read/parse failures are fatal. Unlike
 /// `WorkspacePackageJSONCache::get_with_path_or_exit`, this keeps pack's
-/// error wording and ordering (`Output::err` first, then the log printed
-/// unconditionally on parse errors), matching the `pack_command.zig`
-/// reference.
+/// existing error wording and ordering (`Output::err` first, then the log
+/// printed unconditionally on parse errors), which bun-pack.test.ts asserts.
 fn load_package_json_or_exit<'a>(
     manager_ptr: *mut PackageManager,
     abs_package_json_path: &ZStr,
