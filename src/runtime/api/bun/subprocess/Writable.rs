@@ -17,8 +17,11 @@ use bun_io::pipe_writer::BaseWindowsPipeWriter as _;
 use super::{Flags, StaticPipeWriter, StdioResult, Subprocess, js};
 
 /// Build the `Writable::Buffer` writer for a `Stdio::Blob` /
-/// `Stdio::ArrayBuffer` stdin, leaving `Stdio::Ignore` behind. Shared by the
-/// `Bun.spawn` and shell `Writable::init` (both platform arms of each).
+/// `Stdio::ArrayBuffer` stdin. The payload is moved out of `stdio`: a Blob is
+/// replaced with `Stdio::Ignore`, an ArrayBuffer is `mem::take`n and leaves an
+/// empty `Stdio::ArrayBuffer` behind; callers do not read `stdio` afterwards.
+/// Shared by the `Bun.spawn` and shell `Writable::init` (both platform arms of
+/// each).
 pub(crate) fn buffered_stdin_writer<P: super::static_pipe_writer::StaticPipeWriterProcess>(
     stdio: &mut Stdio,
     event_loop: bun_event_loop::EventLoopHandle,
