@@ -708,60 +708,13 @@ pub(crate) fn edit_catalogs_after_update(
         }
 
         let info = &infos[index];
-        let version_fmt = resolution.npm().version.fmt(string_buf);
-        let new_version: Vec<u8> = 'new_version: {
-            if options.exact_versions {
-                let mut v = Vec::new();
-                write!(&mut v, "{}", version_fmt).expect("infallible: in-memory write");
-                break 'new_version v;
-            }
-
-            let version_literal: &[u8] = 'version_literal: {
-                if !info.is_alias {
-                    break 'version_literal &info.original_version_literal;
-                }
-                if let Some(at_index) =
-                    strings::last_index_of_char(&info.original_version_literal, b'@')
-                {
-                    break 'version_literal &info.original_version_literal[at_index + 1..];
-                }
-                &info.original_version_literal
-            };
-
-            let pinned_version = semver::Version::which_version_is_pinned(version_literal);
-            let mut v = Vec::new();
-            match pinned_version {
-                semver::PinnedVersion::Patch => {
-                    write!(&mut v, "{}", version_fmt).expect("infallible: in-memory write")
-                }
-                semver::PinnedVersion::Minor => {
-                    write!(&mut v, "~{}", version_fmt).expect("infallible: in-memory write")
-                }
-                semver::PinnedVersion::Major => {
-                    write!(&mut v, "^{}", version_fmt).expect("infallible: in-memory write")
-                }
-            }
-            v
-        };
-
-        new_literals[index] = Some(if info.is_alias {
-            let dep_literal = &info.original_version_literal;
-            if let Some(at_index) = strings::last_index_of_char(dep_literal, b'@') {
-                let mut v = Vec::new();
-                write!(
-                    &mut v,
-                    "{}@{}",
-                    bstr::BStr::new(&dep_literal[0..at_index]),
-                    bstr::BStr::new(&new_version)
-                )
-                .expect("infallible: in-memory write");
-                v
-            } else {
-                new_version
-            }
-        } else {
-            new_version
-        });
+        new_literals[index] = Some(replacement_version_literal(
+            resolution.npm().version.fmt(string_buf),
+            &info.original_version_literal,
+            info.is_alias,
+            &info.original_version_literal,
+            options.exact_versions,
+        ));
     }
 
     let mut changed = false;
