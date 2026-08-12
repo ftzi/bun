@@ -177,21 +177,17 @@ unsafe extern "C" {
 /// call into a caller's hot loop (see `pop_last_segment_t` in node/path.rs).
 const SCALAR_CUTOFF: usize = 16;
 
-/// Two configurations cannot reach the kernels: Miri cannot call foreign
-/// functions, and a crate's standalone `cargo test` binary has nothing to link
-/// them from (they are C++ built only into bun; such a crate turns on the
-/// `scalar` feature from its `[dev-dependencies]`, see Cargo.toml). The
-/// workspace denies std's search methods everywhere else, so in both the
-/// search wrappers below take their scalar path at every length. Kernels with
-/// no scalar form here (hashing, hex, sourcemaps, lexer scans) stay FFI-only:
-/// reaching one is a loud error either way (Miri stops; the link fails naming
-/// the symbol).
+/// Under Miri (no foreign calls) and in a crate's own `cargo test` binary
+/// (nothing to link the kernels from; its `[dev-dependencies]` turn on the
+/// `scalar` feature, see Cargo.toml) the search wrappers below take their
+/// scalar path at every length. Kernels with no scalar form here (hashing,
+/// hex, sourcemaps, lexer scans) stay FFI-only and fail loudly in both.
 #[inline(always)]
 fn scalar_only(len: usize) -> bool {
     cfg!(any(miri, feature = "scalar")) || len < SCALAR_CUTOFF
 }
 
-/// Scalar substring search for the configurations above. Callers have already
+/// Scalar substring search for those two configurations. Callers have already
 /// handled the empty needle and `haystack.len() < needle.len()`.
 #[cfg(any(miri, feature = "scalar"))]
 fn scalar_memmem<T: Eq>(haystack: &[T], needle: &[T]) -> Option<usize> {
