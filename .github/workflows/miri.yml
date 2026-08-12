@@ -8,7 +8,9 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
-      # The FFI-free crate set covered by MIRI_CRATES in scripts/rust-miri.ts
+      # The crate sets in scripts/rust-miri.ts (MIRI_CRATES) and
+      # scripts/rust-test.ts (NATIVE_TEST_CRATES), plus bun_highway, whose
+      # scalar paths both of them run on.
       - "src/ast/**"
       - "src/base64/**"
       - "src/clap/**"
@@ -16,6 +18,7 @@ on:
       - "src/dispatch/**"
       - "src/errno/**"
       - "src/hash/**"
+      - "src/highway/**"
       - "src/http_types/**"
       - "src/md/**"
       - "src/paths/**"
@@ -24,6 +27,8 @@ on:
       - "src/shell_parser/**"
       - "src/wyhash/**"
       - "scripts/rust-miri.ts"
+      - "scripts/rust-test.ts"
+      - "scripts/rust-workspace.ts"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
@@ -78,6 +83,14 @@ jobs:
           bun install --frozen-lockfile
           bun scripts/build.ts --configure-only
           ninja -C build/debug clone-lolhtml
+
+      # Same configured tree and clang/lld as Miri needs, and the thing Miri
+      # cannot check: that these crates' test binaries link without the rest
+      # of bun (scripts/rust-test.ts).
+      - name: cargo test
+        env:
+          BUN_CODEGEN_DIR: ${{ github.workspace }}/build/debug/codegen
+        run: bun run rust:test
 
       - name: cargo miri test
         env:

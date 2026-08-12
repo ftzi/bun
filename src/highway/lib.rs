@@ -10,7 +10,7 @@ unsafe extern "C" {
 
     fn highway_count_char(haystack: *const u8, haystack_len: usize, needle: u8) -> usize;
 
-    #[cfg(not(miri))]
+    #[cfg(not(any(miri, feature = "scalar")))]
     fn highway_memmem(
         haystack: *const u8,
         haystack_len: usize,
@@ -20,7 +20,7 @@ unsafe extern "C" {
 
     // These three return `usize::MAX` for not-found (the empty needle matches at
     // 0 / `haystack_len` respectively).
-    #[cfg(not(miri))]
+    #[cfg(not(any(miri, feature = "scalar")))]
     fn highway_memrmem(
         haystack: *const u8,
         haystack_len: usize,
@@ -28,7 +28,7 @@ unsafe extern "C" {
         needle_len: usize,
     ) -> usize;
 
-    #[cfg(not(miri))]
+    #[cfg(not(any(miri, feature = "scalar")))]
     fn highway_memmem16(
         haystack: *const u16,
         haystack_len: usize,
@@ -36,7 +36,7 @@ unsafe extern "C" {
         needle_len: usize,
     ) -> usize;
 
-    #[cfg(not(miri))]
+    #[cfg(not(any(miri, feature = "scalar")))]
     fn highway_memrmem16(
         haystack: *const u16,
         haystack_len: usize,
@@ -177,25 +177,29 @@ unsafe extern "C" {
 /// call into a caller's hot loop (see `pop_last_segment_t` in node/path.rs).
 const SCALAR_CUTOFF: usize = 16;
 
-/// Miri cannot call foreign functions, and the workspace denies std's search
-/// methods everywhere else, so under Miri (`bun run rust:miri`) the search
-/// wrappers below take their scalar path at every length. Kernels with no
-/// scalar form here (hashing, hex, sourcemaps, lexer scans) stay FFI-only:
-/// reaching one from a Miri-tested crate is a loud, immediate error.
+/// Two configurations cannot reach the kernels: Miri cannot call foreign
+/// functions, and a crate's standalone `cargo test` binary has nothing to link
+/// them from (they are C++ built only into bun; such a crate turns on the
+/// `scalar` feature from its `[dev-dependencies]`, see Cargo.toml). The
+/// workspace denies std's search methods everywhere else, so in both the
+/// search wrappers below take their scalar path at every length. Kernels with
+/// no scalar form here (hashing, hex, sourcemaps, lexer scans) stay FFI-only:
+/// reaching one is a loud error either way (Miri stops; the link fails naming
+/// the symbol).
 #[inline(always)]
 fn scalar_only(len: usize) -> bool {
-    cfg!(miri) || len < SCALAR_CUTOFF
+    cfg!(any(miri, feature = "scalar")) || len < SCALAR_CUTOFF
 }
 
-/// Scalar substring search for Miri. Callers have already handled the empty
-/// needle and `haystack.len() < needle.len()`.
-#[cfg(miri)]
+/// Scalar substring search for the configurations above. Callers have already
+/// handled the empty needle and `haystack.len() < needle.len()`.
+#[cfg(any(miri, feature = "scalar"))]
 fn scalar_memmem<T: Eq>(haystack: &[T], needle: &[T]) -> Option<usize> {
     (0..=haystack.len() - needle.len()).find(|&i| haystack[i..i + needle.len()] == *needle)
 }
 
 /// Reverse [`scalar_memmem`]: start index of the last occurrence.
-#[cfg(miri)]
+#[cfg(any(miri, feature = "scalar"))]
 fn scalar_memrmem<T: Eq>(haystack: &[T], needle: &[T]) -> Option<usize> {
     (0..=haystack.len() - needle.len())
         .rev()
@@ -213,7 +217,7 @@ fn found_at(result: usize, haystack_len: usize) -> Option<usize> {
 }
 
 /// The `mem*mem*` kernels return `usize::MAX` for "not found".
-#[cfg(not(miri))]
+#[cfg(not(any(miri, feature = "scalar")))]
 #[inline(always)]
 fn match_at(result: usize) -> Option<usize> {
     if result == usize::MAX {
@@ -278,11 +282,11 @@ pub fn memmem(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if haystack.len() < needle.len() {
         return None;
     }
-    #[cfg(miri)]
+    #[cfg(any(miri, feature = "scalar"))]
     {
         scalar_memmem(haystack, needle)
     }
-    #[cfg(not(miri))]
+    #[cfg(not(any(miri, feature = "scalar")))]
     {
         // SAFETY: both (ptr,len) pairs are valid readable ranges.
         let p = unsafe {
@@ -312,11 +316,11 @@ pub fn memrmem(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if haystack.len() < needle.len() {
         return None;
     }
-    #[cfg(miri)]
+    #[cfg(any(miri, feature = "scalar"))]
     {
         scalar_memrmem(haystack, needle)
     }
-    #[cfg(not(miri))]
+    #[cfg(not(any(miri, feature = "scalar")))]
     {
         // SAFETY: both (ptr,len) pairs are valid readable ranges.
         let result = unsafe {
@@ -341,11 +345,11 @@ pub fn memmem16(haystack: &[u16], needle: &[u16]) -> Option<usize> {
     if haystack.len() < needle.len() {
         return None;
     }
-    #[cfg(miri)]
+    #[cfg(any(miri, feature = "scalar"))]
     {
         scalar_memmem(haystack, needle)
     }
-    #[cfg(not(miri))]
+    #[cfg(not(any(miri, feature = "scalar")))]
     {
         // SAFETY: both (ptr,len) pairs are valid readable ranges (`&[u16]` is 2-byte aligned).
         let result = unsafe {
@@ -372,11 +376,11 @@ pub fn memrmem16(haystack: &[u16], needle: &[u16]) -> Option<usize> {
     if haystack.len() < needle.len() {
         return None;
     }
-    #[cfg(miri)]
+    #[cfg(any(miri, feature = "scalar"))]
     {
         scalar_memrmem(haystack, needle)
     }
-    #[cfg(not(miri))]
+    #[cfg(not(any(miri, feature = "scalar")))]
     {
         // SAFETY: both (ptr,len) pairs are valid readable ranges (`&[u16]` is 2-byte aligned).
         let result = unsafe {
