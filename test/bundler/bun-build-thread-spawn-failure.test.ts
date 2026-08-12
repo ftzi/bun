@@ -1,9 +1,11 @@
 // Bun.build() (and HTML routes in Bun.serve) run on one lazily started
-// "Bundler" thread. An LD_PRELOAD shim makes pthread_create fail for it with
-// EAGAIN, which is what the kernel returns at the RLIMIT_NPROC / cgroup pids
-// limit. That used to abort the whole process ("panic: Failed to spawn bun
-// build thread"); it has to fail the build like any other build error, and a
-// later build has to try starting the thread again.
+// "Bundler" thread. Starting it takes two OS resources, and an LD_PRELOAD shim
+// fails either one: pthread_create with EAGAIN (what the kernel returns at the
+// RLIMIT_NPROC / cgroup pids limit), or the eventfd the thread wakes up on with
+// EMFILE (the open-files limit). Both used to abort the whole process ("panic:
+// Failed to spawn bun build thread" / "panic: Failed to create waker"); they
+// have to fail the build like any other build error, and a later build has to
+// try starting the thread again.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { bunEnv, bunExe, isLinux, tempDir } from "harness";
 import { join } from "node:path";
@@ -23,11 +25,17 @@ const skip = !isLinux || !cc;
 // Other std-spawned 2 MiB threads (file watchers, the Bun.file() IO thread)
 // would be caught too, so the fixtures must not use fs.watch or Bun.file()
 // while armed.
+//
+// eventfd() is easier to attribute: while armed it is only called by the bundle
+// thread itself, which names itself "Bundler" before creating its waker.
 const BUNDLE_THREAD_STACK_SIZE = 2 * 1024 * 1024;
 
-// BUNDLE_THREAD_SPAWN_PLAN has one letter per such attempt: 'f' fails it with
-// EAGAIN (a thread limit), 'n' with ENOMEM, 's' lets it through; the last
-// letter repeats.
+// A plan has one letter per intercepted attempt: 'f' fails it with the
+// resource-limit errno (EAGAIN for pthread_create, EMFILE for eventfd), 'n'
+// with ENOMEM, 's' lets it through; the last letter repeats.
+// BUNDLE_THREAD_SPAWN_PLAN applies to pthread_create calls for the bundle
+// thread, BUNDLE_THREAD_WAKER_PLAN to eventfd() calls made by the bundle
+// thread.
 const SHIM_C = /* c */ `
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -35,39 +43,72 @@ const SHIM_C = /* c */ `
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
 static int (*real_pthread_create)(pthread_t *, const pthread_attr_t *, void *(*)(void *), void *);
+static int (*real_eventfd)(unsigned int, int);
 static const char *armed_file;
-static const char *plan;
-static size_t plan_len;
-static size_t attempts;
+static const char *spawn_plan, *waker_plan;
+static size_t spawn_attempts, waker_attempts;
 
 __attribute__((constructor)) static void init(void) {
   real_pthread_create = dlsym(RTLD_NEXT, "pthread_create");
+  real_eventfd = dlsym(RTLD_NEXT, "eventfd");
   armed_file = getenv("BUNDLE_THREAD_SPAWN_ARMED_FILE");
-  plan = getenv("BUNDLE_THREAD_SPAWN_PLAN");
-  plan_len = plan ? strlen(plan) : 0;
+  spawn_plan = getenv("BUNDLE_THREAD_SPAWN_PLAN");
+  waker_plan = getenv("BUNDLE_THREAD_WAKER_PLAN");
+}
+
+// 0 when the plan is unset, the fixture has not armed the shim, or the step
+// is 's' (let it through).
+static char plan_step(const char *plan, size_t *attempts) {
+  size_t len = plan ? strlen(plan) : 0;
+  if (len == 0 || !armed_file || access(armed_file, F_OK) != 0) return 0;
+  size_t i = __sync_fetch_and_add(attempts, 1);
+  char step = plan[i < len ? i : len - 1];
+  return step == 's' ? 0 : step;
 }
 
 int pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*start)(void *), void *arg) {
   size_t stack_size = 0;
   if (attr) pthread_attr_getstacksize(attr, &stack_size);
-  if (stack_size == ${BUNDLE_THREAD_STACK_SIZE} && plan_len > 0 && armed_file &&
-      syscall(SYS_gettid) == getpid() && access(armed_file, F_OK) == 0) {
-    size_t i = __sync_fetch_and_add(&attempts, 1);
-    switch (plan[i < plan_len ? i : plan_len - 1]) {
+  if (stack_size == ${BUNDLE_THREAD_STACK_SIZE} && syscall(SYS_gettid) == getpid()) {
+    switch (plan_step(spawn_plan, &spawn_attempts)) {
       case 'f': return EAGAIN;
       case 'n': return ENOMEM;
     }
   }
   return real_pthread_create(thread, attr, start, arg);
 }
+
+int eventfd(unsigned int initval, int flags) {
+  char name[16] = {0};
+  if (prctl(PR_GET_NAME, name) == 0 && strcmp(name, "Bundler") == 0) {
+    switch (plan_step(waker_plan, &waker_attempts)) {
+      case 'f': errno = EMFILE; return -1;
+      case 'n': errno = ENOMEM; return -1;
+    }
+  }
+  return real_eventfd(initval, flags);
+}
 `;
 
-const EXPECTED_ERROR =
-  "Failed to start the bundler thread: EAGAIN. The process or thread limit may have been reached (ulimit -u, or the container's pids limit).";
+const MODES = [
+  {
+    name: "pthread_create fails",
+    planEnv: "BUNDLE_THREAD_SPAWN_PLAN",
+    error:
+      "Failed to start the bundler thread: EAGAIN. The process or thread limit may have been reached (ulimit -u, or the container's pids limit).",
+  },
+  {
+    name: "creating its waker fails",
+    planEnv: "BUNDLE_THREAD_WAKER_PLAN",
+    error:
+      "Failed to start the bundler thread: EMFILE. The open file limit may have been reached (ulimit -n, or the system-wide limit).",
+  },
+];
 
 // The sync fs calls arm and disarm the shim without creating threads themselves.
 const ARM_HELPERS = /* js */ `
@@ -83,7 +124,8 @@ function disarm() {
 
 // Prints one JSON line per Bun.build() call; `throw` is taken from argv so the
 // same fixture covers the rejecting and the { success: false } flavors.
-// Bun.build() starts the bundle thread before it returns its promise.
+// Bun.build() starts the bundle thread (including its waker) before it returns
+// its promise.
 const BUILD_FIXTURE = /* js */ `
 ${ARM_HELPERS}
 const [, , throwArg, count] = process.argv;
@@ -162,7 +204,7 @@ afterAll(() => {
 
 let runs = 0;
 
-async function runWithPlan(plan: string, ...args: string[]) {
+async function runWithPlan(planEnv: string, plan: string, ...args: string[]) {
   const existing = bunEnv.LD_PRELOAD;
   await using proc = Bun.spawn({
     cmd: [bunExe(), ...args],
@@ -170,7 +212,7 @@ async function runWithPlan(plan: string, ...args: string[]) {
     env: {
       ...bunEnv,
       LD_PRELOAD: existing ? `${shimPath}:${existing}` : shimPath,
-      BUNDLE_THREAD_SPAWN_PLAN: plan,
+      [planEnv]: plan,
       // Per run: a fixture that crashes while armed must not arm the others.
       BUNDLE_THREAD_SPAWN_ARMED_FILE: join(String(dir), `armed-${runs++}`),
     },
@@ -190,76 +232,78 @@ async function runWithPlan(plan: string, ...args: string[]) {
   };
 }
 
-describe.skipIf(skip)("Bun.build() when the bundle thread cannot be started", () => {
-  test.concurrent("rejects with the error in the AggregateError", async () => {
-    expect(await runWithPlan("f", "build.js", "throw", "1")).toEqual({
-      results: [
-        {
-          settled: "rejected",
-          name: "AggregateError",
-          message: "Bundle failed",
-          errors: [EXPECTED_ERROR],
-          onEnd: false,
-        },
-      ],
-      stderr: "",
-      exitCode: 0,
-      signalCode: null,
+describe.skipIf(skip)("Bun.build() when the bundle thread cannot be started because", () => {
+  describe.each(MODES)("$name", ({ planEnv, error }) => {
+    test.concurrent("rejects with the error in the AggregateError", async () => {
+      expect(await runWithPlan(planEnv, "f", "build.js", "throw", "1")).toEqual({
+        results: [
+          {
+            settled: "rejected",
+            name: "AggregateError",
+            message: "Bundle failed",
+            errors: [error],
+            onEnd: false,
+          },
+        ],
+        stderr: "",
+        exitCode: 0,
+        signalCode: null,
+      });
     });
-  });
 
-  test.concurrent("resolves with success: false and the error in the logs under throw: false", async () => {
-    expect(await runWithPlan("f", "build.js", "nothrow", "1")).toEqual({
-      results: [{ settled: "resolved", success: false, logs: [EXPECTED_ERROR], onEnd: false }],
-      stderr: "",
-      exitCode: 0,
-      signalCode: null,
+    test.concurrent("resolves with success: false and the error in the logs under throw: false", async () => {
+      expect(await runWithPlan(planEnv, "f", "build.js", "nothrow", "1")).toEqual({
+        results: [{ settled: "resolved", success: false, logs: [error], onEnd: false }],
+        stderr: "",
+        exitCode: 0,
+        signalCode: null,
+      });
     });
-  });
 
-  test.concurrent("reports other errors without the thread-limit hint", async () => {
-    expect(await runWithPlan("n", "build.js", "nothrow", "1")).toEqual({
-      results: [
-        { settled: "resolved", success: false, logs: ["Failed to start the bundler thread: ENOMEM."], onEnd: false },
-      ],
-      stderr: "",
-      exitCode: 0,
-      signalCode: null,
+    test.concurrent("reports other errors without the resource-limit hint", async () => {
+      expect(await runWithPlan(planEnv, "n", "build.js", "nothrow", "1")).toEqual({
+        results: [
+          { settled: "resolved", success: false, logs: ["Failed to start the bundler thread: ENOMEM."], onEnd: false },
+        ],
+        stderr: "",
+        exitCode: 0,
+        signalCode: null,
+      });
     });
-  });
 
-  test.concurrent("the next build starts the thread again", async () => {
-    expect(await runWithPlan("fs", "build.js", "nothrow", "2")).toEqual({
-      results: [
-        { settled: "resolved", success: false, logs: [EXPECTED_ERROR], onEnd: false },
-        { settled: "resolved", success: true, logs: [], onEnd: true },
-      ],
-      stderr: "",
-      exitCode: 0,
-      signalCode: null,
+    test.concurrent("the next build starts the thread again", async () => {
+      expect(await runWithPlan(planEnv, "fs", "build.js", "nothrow", "2")).toEqual({
+        results: [
+          { settled: "resolved", success: false, logs: [error], onEnd: false },
+          { settled: "resolved", success: true, logs: [], onEnd: true },
+        ],
+        stderr: "",
+        exitCode: 0,
+        signalCode: null,
+      });
     });
-  });
 
-  test.concurrent("every build fails while the thread keeps failing to start", async () => {
-    expect(await runWithPlan("f", "build.js", "nothrow", "2")).toEqual({
-      results: [
-        { settled: "resolved", success: false, logs: [EXPECTED_ERROR], onEnd: false },
-        { settled: "resolved", success: false, logs: [EXPECTED_ERROR], onEnd: false },
-      ],
-      stderr: "",
-      exitCode: 0,
-      signalCode: null,
+    test.concurrent("every build fails while the thread keeps failing to start", async () => {
+      expect(await runWithPlan(planEnv, "f", "build.js", "nothrow", "2")).toEqual({
+        results: [
+          { settled: "resolved", success: false, logs: [error], onEnd: false },
+          { settled: "resolved", success: false, logs: [error], onEnd: false },
+        ],
+        stderr: "",
+        exitCode: 0,
+        signalCode: null,
+      });
     });
-  });
 
-  test.concurrent("an HTML route in Bun.serve answers 500, then builds once the thread starts", async () => {
-    const { stderr, ...rest } = await runWithPlan("fs", "serve.js");
-    expect({ ...rest, stderrLines: stderr.split("\n") }).toEqual({
-      results: [{ first: 500, second: 200 }],
-      // The failed first build's log, then the second request's bundle timing.
-      stderrLines: [`error: ${EXPECTED_ERROR}`, expect.stringMatching(/^\[[\d.]+m?s\] bundle index\.html /)],
-      exitCode: 0,
-      signalCode: null,
+    test.concurrent("an HTML route in Bun.serve answers 500, then builds once the thread starts", async () => {
+      const { stderr, ...rest } = await runWithPlan(planEnv, "fs", "serve.js");
+      expect({ ...rest, stderrLines: stderr.split("\n") }).toEqual({
+        results: [{ first: 500, second: 200 }],
+        // The failed first build's log, then the second request's bundle timing.
+        stderrLines: [`error: ${error}`, expect.stringMatching(/^\[[\d.]+m?s\] bundle index\.html /)],
+        exitCode: 0,
+        signalCode: null,
+      });
     });
   });
 });
