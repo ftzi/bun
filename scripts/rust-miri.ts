@@ -15,6 +15,10 @@
  * is the candidate replacement spec, allows that pattern, and still catches
  * the bugs we care about.
  *
+ * Miri never links, so it cannot tell when a crate's tests start reaching a
+ * symbol only the full bun binary defines; `bun run rust:test`
+ * (scripts/rust-test.ts) runs the same crate set natively for that.
+ *
  * Usage:
  *   bun run rust:miri              # default safe crate set
  *   bun run rust:miri -p bun_foo   # extra args go straight to cargo miri test
@@ -29,8 +33,10 @@ const repo = resolve(import.meta.dirname, "..");
 // Crates that pass `cargo miri test` under Tree Borrows. To add one it must
 // (a) have at least one `#[test]`, (b) compile under `--cfg test`, (c) not
 // call into `extern "C"` at test runtime — Miri reports
-// `unsupported operation: can't call foreign function` if it does.
-const MIRI_CRATES = [
+// `unsupported operation: can't call foreign function` if it does — and
+// (d) link as a plain `cargo test` binary (see rust-test.ts), or be listed
+// as pending there.
+export const MIRI_CRATES = [
   "bun_ast",
   "bun_base64",
   "bun_clap",
@@ -47,16 +53,17 @@ const MIRI_CRATES = [
   "bun_wyhash",
 ];
 
-function run(cmd: string, args: string[], opts: Parameters<typeof spawnSync>[2] = {}) {
+export function run(cmd: string, args: string[], opts: Parameters<typeof spawnSync>[2] = {}) {
   return spawnSync(cmd, args, { stdio: "inherit", cwd: repo, ...opts });
 }
 
 // `bun_core/build.rs` needs `build_options.rs`; cargo can't resolve the
 // workspace until `vendor/lolhtml/` (a path dep) exists. Both come from the
 // configure step, which is a no-op when already done.
-const buildOptionsRs = resolve(repo, "build/debug/codegen/build_options.rs");
-const lolhtmlCargo = resolve(repo, "vendor/lolhtml/Cargo.toml");
-if (!existsSync(buildOptionsRs) || !existsSync(lolhtmlCargo)) {
+export function ensureConfigured() {
+  const buildOptionsRs = resolve(repo, "build/debug/codegen/build_options.rs");
+  const lolhtmlCargo = resolve(repo, "vendor/lolhtml/Cargo.toml");
+  if (existsSync(buildOptionsRs) && existsSync(lolhtmlCargo)) return;
   console.log("\x1b[36m[setup]\x1b[0m bun run build --configure-only");
   if (run("bun", ["run", "build", "--configure-only"]).status !== 0) process.exit(1);
   if (!existsSync(lolhtmlCargo) && run("ninja", ["-C", "build/debug", "clone-lolhtml"]).status !== 0) {
@@ -76,14 +83,18 @@ if (!existsSync(buildOptionsRs) || !existsSync(lolhtmlCargo)) {
   }
 }
 
-const extraArgs = process.argv.slice(2);
-const crateArgs = extraArgs.length > 0 ? extraArgs : MIRI_CRATES.flatMap(c => ["-p", c]);
+if (import.meta.main) {
+  ensureConfigured();
 
-console.log(`\x1b[36m[miri]\x1b[0m cargo miri test ${crateArgs.join(" ")}`);
-const r = run("cargo", ["miri", "test", ...crateArgs], {
-  env: {
-    ...process.env,
-    MIRIFLAGS: ["-Zmiri-tree-borrows", process.env.MIRIFLAGS ?? ""].join(" ").trim(),
-  },
-});
-process.exit(r.status ?? 1);
+  const extraArgs = process.argv.slice(2);
+  const crateArgs = extraArgs.length > 0 ? extraArgs : MIRI_CRATES.flatMap(c => ["-p", c]);
+
+  console.log(`\x1b[36m[miri]\x1b[0m cargo miri test ${crateArgs.join(" ")}`);
+  const r = run("cargo", ["miri", "test", ...crateArgs], {
+    env: {
+      ...process.env,
+      MIRIFLAGS: ["-Zmiri-tree-borrows", process.env.MIRIFLAGS ?? ""].join(" ").trim(),
+    },
+  });
+  process.exit(r.status ?? 1);
+}

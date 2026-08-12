@@ -24,6 +24,7 @@ on:
       - "src/shell_parser/**"
       - "src/wyhash/**"
       - "scripts/rust-miri.ts"
+      - "scripts/rust-test.ts"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
@@ -79,7 +80,17 @@ jobs:
           bun scripts/build.ts --configure-only
           ninja -C build/debug clone-lolhtml
 
+      - name: cargo test
+        # Same crate set, linked as ordinary host test binaries. Miri never
+        # links, so this is what catches a test reaching a symbol only the full
+        # bun binary defines (scripts/rust-test.ts). Runs first because it is
+        # the quick one; Miri below still reports when it fails.
+        env:
+          BUN_CODEGEN_DIR: ${{ github.workspace }}/build/debug/codegen
+        run: bun run rust:test
+
       - name: cargo miri test
+        if: ${{ !cancelled() }}
         env:
           BUN_CODEGEN_DIR: ${{ github.workspace }}/build/debug/codegen
         run: bun run rust:miri
