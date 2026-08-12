@@ -177,18 +177,17 @@ unsafe extern "C" {
 /// call into a caller's hot loop (see `pop_last_segment_t` in node/path.rs).
 const SCALAR_CUTOFF: usize = 16;
 
-/// Under Miri (no foreign calls) and in a crate's own `cargo test` binary
-/// (nothing to link the kernels from; its `[dev-dependencies]` turn on the
-/// `scalar` feature, see Cargo.toml) the search wrappers below take their
-/// scalar path at every length. Kernels with no scalar form here (hashing,
-/// hex, sourcemaps, lexer scans) stay FFI-only and fail loudly in both.
+/// Miri cannot call foreign functions, and the `scalar` feature (see Cargo.toml)
+/// is for binaries that have nothing to link the kernels from; in both, the
+/// search wrappers below take their scalar path at every length. Kernels with
+/// no scalar form here (hashing, hex, sourcemaps, lexer scans) stay FFI-only.
 #[inline(always)]
 fn scalar_only(len: usize) -> bool {
     cfg!(any(miri, feature = "scalar")) || len < SCALAR_CUTOFF
 }
 
-/// Scalar substring search for those two configurations. Callers have already
-/// handled the empty needle and `haystack.len() < needle.len()`.
+/// Scalar substring search for `scalar_only`'s two configurations. Callers
+/// have already handled the empty needle and `haystack.len() < needle.len()`.
 #[cfg(any(miri, feature = "scalar"))]
 fn scalar_memmem<T: Eq>(haystack: &[T], needle: &[T]) -> Option<usize> {
     (0..=haystack.len() - needle.len()).find(|&i| haystack[i..i + needle.len()] == *needle)
