@@ -117,11 +117,11 @@ it("Blob inspect", () => {
   type: "text/plain;charset=utf-8"
 }`);
   // A File over a BunFile keeps the FileRef header but has its own name.
-  expect(Bun.inspect(new File([bunFile], "custom.txt")).split("\n").slice(0, 3)).toEqual([
-    `FileRef ("${tmpFile}") {`,
-    `  name: "custom.txt",`,
-    `  type: "text/plain;charset=utf-8",`,
-  ]);
+  expect(
+    Bun.inspect(new File([bunFile], "custom.txt"))
+      .split("\n")
+      .slice(0, 3),
+  ).toEqual([`FileRef ("${tmpFile}") {`, `  name: "custom.txt",`, `  type: "text/plain;charset=utf-8",`]);
   expect(Bun.inspect(new Response(new Blob()))).toBe(`Response (0 KB) {
   ok: true,
   url: "",
