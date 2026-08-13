@@ -419,7 +419,10 @@ describe("darwin rust linker: no forced -fuse-ld=lld (#30870)", () => {
     // section for every triple in `allRustTargets`, so one run covers both
     // apple-darwin triples plus the linux regression guard.
     const cfg = {
-      ...resolveConfig({ os: "linux", arch: "x64", abi: "gnu", buildType: "Release", linuxSysroot: "/fake" }, mockToolchain()),
+      ...resolveConfig(
+        { os: "linux", arch: "x64", abi: "gnu", buildType: "Release", linuxSysroot: "/fake" },
+        mockToolchain(),
+      ),
       cwd: String(dir),
     } as Config;
     const outPath = generateCargoConfig(cfg);
