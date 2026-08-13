@@ -110,6 +110,8 @@ it("Blob inspect", () => {
   expect(Bun.inspect(Bun.file(123))).toBe(`FileRef (fd: 123) {
   type: "application/octet-stream"
 }`);
+  // A cloned fd-backed file deserializes with an empty name; don't print it.
+  expect(Bun.inspect(structuredClone(Bun.file(123)))).toBe(Bun.inspect(Bun.file(123)));
   // Reading .name caches it; the header already shows the path, so no name line.
   const bunFile = Bun.file(tmpFile);
   void bunFile.name;
