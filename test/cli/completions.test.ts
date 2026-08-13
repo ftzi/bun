@@ -10,6 +10,8 @@
 
 import { describe, expect, test } from "bun:test";
 import { bunEnv, bunExe, isWindows, tempDir } from "harness";
+import { chmodSync } from "node:fs";
+import { join } from "node:path";
 
 async function embeddedCompletions(shell: "fish" | "bash" | "zsh"): Promise<string> {
   using home = tempDir(`bun-completions-${shell}`, {});
@@ -246,16 +248,23 @@ describe.skipIf(isWindows)("shell completions: `bun <path>` and runtime flags (#
     async () => {
       const script = await embeddedCompletions("fish");
       using dir = tempDir("bun-fish-completion-7805", { "bun.fish": script, ...fixtureFiles });
+      // The script shells out to `bun getcompletes` for the dynamic script/bin
+      // candidates, which this test is not about. Stub it so every completion
+      // below is fast and only the script's own logic can write to stderr,
+      // which is asserted empty.
+      using bin = tempDir("bun-fish-completion-7805-bin", { bun: "#!/bin/sh\nexit 0\n" });
+      chmodSync(join(String(bin), "bun"), 0o755);
 
       async function complete(line: string): Promise<string[]> {
         await using proc = Bun.spawn({
           cmd: [fishBin!, "--no-config", "-c", `source ./bun.fish; complete -C ${JSON.stringify(line)}`],
           cwd: String(dir),
-          env: { ...bunEnv, PATH: process.env.PATH, HOME: String(dir) },
+          env: { ...bunEnv, PATH: `${String(bin)}:${process.env.PATH}`, HOME: String(dir) },
           stdout: "pipe",
           stderr: "pipe",
         });
-        const [stdout, , exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+        const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+        expect(stderr, `line: ${JSON.stringify(line)}`).toBe("");
         expect(exitCode).toBe(0);
         return stdout
           .split("\n")

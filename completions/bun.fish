@@ -43,8 +43,12 @@ set -l bun_builtin_cmds_accepting_flags create help bun upgrade discord run init
 set -l bun_cmds_without_file_args $bun_builtin_cmds_without_run i ci a r rm uninstall c link unlink outdated publish patch info audit exec why whoami list completions
 
 function __bun_first_positional -d "Print the first non-flag word after bun, skipping values of known arg-taking runtime flags"
+    # Same token walk as fish's own __fish_use_subcommand; `set -e` rather than
+    # an open-ended `[2..]` range, which needs fish 3.4.
+    set -l tokens (commandline -poc)
+    set -e tokens[1]
     set -l skip 0
-    for tok in (commandline -poc)[2..]
+    for tok in $tokens
         if test $skip -eq 1
             set skip 0
             continue
