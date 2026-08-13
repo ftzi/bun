@@ -37,8 +37,11 @@ set -l bun_install_boolean_flags_descriptions "Write a yarn.lock file (yarn v1)"
 
 set -l bun_builtin_cmds_without_run dev create help bun upgrade discord install remove add update init pm x repl
 set -l bun_builtin_cmds_accepting_flags create help bun upgrade discord run init link unlink pm x update
+# Subcommands whose arguments are never file paths. Anything else in the first
+# position (`run`, `test`, `build`, or a script/file being executed) takes files.
+set -l bun_cmds_without_file_args $bun_builtin_cmds_without_run link unlink outdated publish patch info audit exec
 
-function __bun_use_subcommand -d "Like __fish_use_subcommand but skips values of known arg-taking runtime flags"
+function __bun_first_positional -d "Print the first non-flag word after bun, skipping values of known arg-taking runtime flags"
     set -l skip 0
     for tok in (commandline -poc)[2..]
         if test $skip -eq 1
@@ -50,10 +53,15 @@ function __bun_use_subcommand -d "Like __fish_use_subcommand but skips values of
                 set skip 1
             case '-*'
             case '*'
-                return 1
+                echo $tok
+                return
         end
     end
-    return 0
+end
+
+function __bun_use_subcommand -d "Like __fish_use_subcommand but skips values of known arg-taking runtime flags"
+    set -l first (__bun_first_positional)
+    test -z "$first"
 end
 
 function __bun_complete_bins_scripts --inherit-variable bun_builtin_cmds_without_run -d "Emit bun completions for bins and scripts"
@@ -87,11 +95,9 @@ function __bun_complete_bins_scripts --inherit-variable bun_builtin_cmds_without
     end
 end
 
-function __bun_entrypoint --inherit-variable bun_builtin_cmds_without_run -d "True when completing the file/script position for `bun` or `bun run`"
-    if __fish_seen_subcommand_from $bun_builtin_cmds_without_run
-        return 1
-    end
-    __bun_use_subcommand; or __fish_seen_subcommand_from run
+function __bun_takes_files --inherit-variable bun_cmds_without_file_args -d "True unless the first positional is a subcommand whose arguments are not files"
+    set -l first (__bun_first_positional)
+    not contains -- "$first" $bun_cmds_without_file_args
 end
 
 
@@ -100,8 +106,9 @@ complete -e -c bun
 
 # Dynamically emit scripts and binaries
 complete -c bun -f -a "(__bun_complete_bins_scripts)"
-# Complete file paths for `bun <file>` / `bun run <file>`, including through runtime flags.
-complete -c bun -n __bun_entrypoint -F
+# Complete file paths for `bun <file>`, `bun run <file>`, and the arguments that
+# follow a script (`bun script.ts <file>`), including through runtime flags.
+complete -c bun -n __bun_takes_files -F
 
 # Complete flags if we have no subcommand or a flag-friendly one.
 set -l flag_applies "__bun_use_subcommand; or __fish_seen_subcommand_from $bun_builtin_cmds_accepting_flags"

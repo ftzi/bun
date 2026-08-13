@@ -271,9 +271,15 @@ describe.skipIf(isWindows)("shell completions: `bun <path>` and runtime flags (#
       const afterHot = await complete("bun --hot ");
       expect(afterHot).toContain("run");
 
-      // Subcommands other than `run` should not get entrypoint file completion.
-      const afterAdd = await complete("bun add src/");
-      expect(afterAdd).not.toContain("src/index.ts");
+      // The arguments after a script being executed are completed as files
+      // too (#30386), however many of them precede the cursor.
+      expect(await complete("bun src/index.ts src/")).toContain("src/other.ts");
+      expect(await complete("bun src/index.ts prev-arg src/")).toContain("src/other.ts");
+
+      // Package-manager subcommands do not take file arguments.
+      for (const line of ["bun add src/", "bun link src/", "bun outdated src/"]) {
+        expect(await complete(line), `line: ${JSON.stringify(line)}`).not.toContain("src/index.ts");
+      }
     },
   );
 
