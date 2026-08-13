@@ -1116,8 +1116,7 @@ impl BlobExt for Blob {
         let show_name = if self.is_s3() {
             false
         } else if self.is_bun_file() {
-            // The FileRef header already printed the store path; only show a
-            // name that was set to something else (new File([bunFile], "x")).
+            // Skip when it would just repeat the path in the FileRef header.
             let name = self.name.get();
             name.tag() != bun_core::Tag::Dead
                 && !self.get_file_name().is_some_and(|path| name.eql_utf8(path))
