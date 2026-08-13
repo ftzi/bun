@@ -1118,8 +1118,7 @@ impl BlobExt for Blob {
         } else if self.is_bun_file() {
             // Skip when it would just repeat the path in the FileRef header.
             let name = self.name.get();
-            !name.is_empty()
-                && !self.get_file_name().is_some_and(|path| name.eql_utf8(path))
+            !name.is_empty() && !self.get_file_name().is_some_and(|path| name.eql_utf8(path))
         } else {
             (self.is_jsdom_file.get() && self.get_name_string().is_some())
                 || (!self.name.get().is_empty()
