@@ -107,6 +107,56 @@ describeWithContainer("postgres", { image: "postgres_plain" }, container => {
     }
   });
 
+  test("a pipelined pair of parameterised queries over a DISCARDed statement recovers for later queries", async () => {
+    await container.ready;
+    await using sql = connect();
+    const q = (n: number) => sql`select ${n}::int as v`;
+    expect(await q(1)).toEqual([{ v: 1 }]);
+
+    await sql`discard all`.simple();
+    // Both Binds name the discarded statement and are normally on the wire
+    // together, in which case the first is surfaced as 26000 and the second
+    // may be transparently re-prepared once the first has settled. Each must
+    // settle either way, and neither may hang.
+    const settled = await Promise.allSettled([q(2), q(3)]);
+    expect(settled.map(r => (r.status === "rejected" ? (r.reason as any).errno : r.value))).toEqual(
+      settled.map((r, i) => (r.status === "rejected" ? "26000" : [{ v: i + 2 }])),
+    );
+
+    // Before the fix this rejected with errno 26000 forever.
+    expect(await q(4)).toEqual([{ v: 4 }]);
+  });
+
+  test("a 0A000 raised by the query itself keeps the statement cached and is not retried", async () => {
+    await container.ready;
+    await using sql = connect();
+    const fn = "fn_inv_" + randomUUIDv7("hex").replaceAll("-", "");
+    try {
+      // This 0A000 comes from PL/pgSQL (routine exec_stmt_raise), not from the
+      // plan cache: the prepared statement is fine and must stay cached.
+      await sql`
+        create function ${sql(fn)}(int) returns int as $$ begin raise feature_not_supported; end $$ language plpgsql
+      `.simple();
+      const call = (n: number) => sql`select ${sql(fn)}(${n})`.catch(e => e);
+      // The only prepared statement mentioning the function is the call above
+      // (create/drop run through the simple protocol and are never prepared).
+      const prepared = () => sql`select name from pg_prepared_statements where statement like ${"%" + fn + "%"}`;
+
+      const first = await call(0);
+      expect(first.errno).toBe("0A000");
+      expect(first.routine).not.toBe("RevalidateCachedQuery");
+
+      const before = await prepared();
+      expect(before).toHaveLength(1);
+      const again = await Promise.all([call(1), call(2), call(3)]);
+      expect(again.map(e => e.errno)).toEqual(["0A000", "0A000", "0A000"]);
+      // Same server-side name as before: nothing was evicted or re-prepared.
+      expect(await prepared()).toEqual(before);
+    } finally {
+      await sql`drop function if exists ${sql(fn)}(int)`.simple();
+    }
+  });
+
   test("inside a transaction block the original 0A000 is surfaced (not masked by a retry)", async () => {
     await container.ready;
     await using sql = connect();
