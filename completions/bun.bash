@@ -6,11 +6,7 @@ _file_arguments() {
     shopt -s extglob 2>/dev/null
 
     COMPREPLY+=( $(compgen -d -- "${cur_word}") )
-    if [[ -z "${cur_word}" ]]; then
-        COMPREPLY+=( $(compgen -fG -X "${extensions}" -- "${cur_word}") );
-    else
-        COMPREPLY+=( $(compgen -f -X "${extensions}" -- "${cur_word}") );
-    fi
+    COMPREPLY+=( $(compgen -f -X "${extensions}" -- "${cur_word}") )
 
     eval "${reset}" 2>/dev/null
 }

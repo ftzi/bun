@@ -43,6 +43,8 @@ const zshBin = Bun.which("zsh");
 
 const fixtureFiles = {
   "package.json": JSON.stringify({ name: "fixture", scripts: { myscript: "echo hi" } }),
+  "entry.ts": 'console.log("entry");',
+  "notes.txt": "not runnable",
   "src/index.ts": 'console.log("index");',
   "src/other.ts": 'console.log("other");',
 };
@@ -109,6 +111,16 @@ describe.skipIf(isWindows)("shell completions: `bun <path>` and runtime flags (#
       expect(afterFlag).toContain("run");
       expect(afterFlag).toContain("install");
       expect(afterFlag).toContain("--watch");
+
+      // With nothing typed yet, runnable files and directories are listed and
+      // the extension filter still applies. (The old empty-word branch passed
+      // `-fG`, which made compgen read `-X` as the glob and list nothing.)
+      for (const line of ["bun ", "bun run ", "bun --hot "]) {
+        const reply = await bashComplete(String(dir), line);
+        expect(reply, `line: ${JSON.stringify(line)}`).toContain("entry.ts");
+        expect(reply, `line: ${JSON.stringify(line)}`).toContain("src");
+        expect(reply, `line: ${JSON.stringify(line)}`).not.toContain("notes.txt");
+      }
     },
   );
 
