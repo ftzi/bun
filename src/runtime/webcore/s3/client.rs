@@ -301,13 +301,14 @@ pub(crate) fn list_objects(
         callback_context,
         callback: s3_simple_request::Callback::ListObjects(callback),
         headers,
-        vm: Some(bun_ptr::BackRef::new(VirtualMachine::get())),
+        loop_handle: VirtualMachine::get().loop_handle(),
         response_buffer: MutableString::default(),
         result: bun_http::HTTPClientResult::default(),
         concurrent_task: Default::default(),
         proxy_url: Box::default(),
         body: Box::default(),
         poll_ref: bun_io::KeepAlive::init(),
+        signal_store: Default::default(),
     }));
     // SAFETY: just allocated, non-null
     let task = unsafe { &mut *task_ptr };
@@ -339,7 +340,8 @@ pub(crate) fn list_objects(
     } else {
         None
     };
-    let vm = task.vm.expect("vm set at task creation");
+    // JS thread (request setup): read options from the current VM.
+    let vm = VirtualMachine::get();
 
     task.http.write(bun_http::AsyncHTTP::init(
         bun_http::Method::GET,
@@ -347,17 +349,19 @@ pub(crate) fn list_objects(
         task.headers.entries.clone().expect("OOM"),
         headers_buf,
         b"",
-        bun_http::HTTPClientResultCallback::new::<S3HttpSimpleTask>(
+        bun_http::HTTPClientResultCallback::new_with_release::<S3HttpSimpleTask>(
             task_ptr,
             // SAFETY: `task_ptr` is the heap-allocated task registered above; the
             // HTTP thread invokes this with that exact pointer.
             S3HttpSimpleTask::http_callback,
+            S3HttpSimpleTask::release_at_shutdown,
         ),
         bun_http::FetchRedirect::Follow,
         bun_http::async_http::Options {
             http_proxy,
             verbose: Some(vm.get_verbose_fetch()),
             reject_unauthorized: Some(vm.get_tls_reject_unauthorized()),
+            signals: Some(task.signal_store.to()),
             ..Default::default()
         },
     ));
@@ -367,6 +371,11 @@ pub(crate) fn list_objects(
     let mut batch = bun_threading::thread_pool::Batch::default();
     // SAFETY: `http` was initialised by `task.http.write(...)` immediately above.
     unsafe { task.http.assume_init_mut() }.schedule(&mut batch);
+    // Out on the HTTP thread until its final callback: the VM aborts it at
+    // teardown (registry) and waits for it (embedded work).
+    task.loop_handle.embedded_work_scheduled();
+    crate::jsc_hooks::ActiveHandle::S3Request(core::ptr::NonNull::new(task_ptr).expect("task"))
+        .register();
     bun_http::HTTPThread::schedule(batch);
     Ok(())
 }
@@ -1037,10 +1046,10 @@ pub(crate) fn upload_stream(
                 return Ok(end_promise_value);
             }
 
-            let buffered = byte_stream.drain();
-            let has_last = byte_stream.has_received_last_chunk.get();
+            let buffered = byte_stream.take_buffer();
+            let had_last = byte_stream.has_received_last_chunk.get();
             if !buffered.is_empty() {
-                let chunk = if has_last {
+                let chunk = if had_last {
                     crate::webcore::streams::StreamResult::OwnedAndDone(buffered)
                 } else {
                     crate::webcore::streams::StreamResult::Owned(buffered)
@@ -1062,15 +1071,18 @@ pub(crate) fn upload_stream(
                     _ => {}
                 }
             }
-            if has_last {
+            if had_last {
                 byte_stream.sink.set(crate::webcore::SinkHandle::None);
                 sink.source.clear();
                 if !sink.ended {
                     let _ = sink.end(None);
                 }
                 ctx.handle_resolve_stream();
+            } else if !byte_stream.sink_paused.get() {
+                // Wake the producer after the older bytes are in the sink.
+                byte_stream.signal_drained();
             }
-            // `!has_last`: the stream-pump +1 (rc=2) is released by
+            // `!had_last`: the stream-pump +1 (rc=2) is released by
             // `NetworkSink::end_from_stream` after the terminal write/fail so the
             // sink outlives the synchronous `resolve()` re-entry.
             return Ok(end_promise_value);
@@ -1224,7 +1236,7 @@ fn download_stream(
             callback,
             headers,
             // `VirtualMachine::get()` returns the live per-thread VM singleton.
-            vm: Some(bun_ptr::BackRef::new(VirtualMachine::get())),
+            loop_handle: VirtualMachine::get().loop_handle(),
             has_schedule_callback: core::sync::atomic::AtomicBool::new(false),
             signal_store: Default::default(),
             signals: Default::default(),
@@ -1277,11 +1289,12 @@ fn download_stream(
         task.headers.entries.clone().expect("OOM"),
         headers_buf,
         b"",
-        bun_http::HTTPClientResultCallback::new::<S3HttpDownloadStreamingTask>(
+        bun_http::HTTPClientResultCallback::new_with_release::<S3HttpDownloadStreamingTask>(
             task_ptr,
             // SAFETY: `task_ptr` is the heap-allocated task registered above; the
             // HTTP thread invokes this with that exact pointer.
             S3HttpDownloadStreamingTask::http_callback,
+            S3HttpDownloadStreamingTask::release_at_shutdown,
         ),
         bun_http::FetchRedirect::Follow,
         bun_http::async_http::Options {
@@ -1301,6 +1314,11 @@ fn download_stream(
     bun_http::http_thread::init(&Default::default());
     let mut batch = bun_threading::thread_pool::Batch::default();
     http.schedule(&mut batch);
+    // Out on the HTTP thread until its final callback: the VM aborts it at
+    // teardown (registry) and waits for it (embedded work).
+    task.loop_handle.embedded_work_scheduled();
+    crate::jsc_hooks::ActiveHandle::S3Download(core::ptr::NonNull::new(task_ptr).expect("task"))
+        .register();
     bun_http::HTTPThread::schedule(batch);
     task_ptr
 }

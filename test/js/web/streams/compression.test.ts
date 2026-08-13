@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { bunEnv, bunExe, isASAN } from "harness";
 import zlib from "node:zlib";
 
 // CompressionStream et al are C++ subclasses of JSTransformStream so that
@@ -713,3 +714,108 @@ describe("CompressionStream chunk handling (Node v26 semantics)", () => {
     expect(decoded).toBe("hello world");
   });
 });
+
+// The native coder (a gzip deflate context is ~280 KiB of zlib state) must be
+// released eagerly at the transform's terminal (ClearAlgorithms: post-flush,
+// error, cancel), not left to the cell's finalizer. Finalizers run late, so a
+// busy loop of pipelines whose SOURCE errors otherwise retains every context:
+// Bun.gc(true) cannot reclaim them and RSS grows by ~280 KiB per iteration.
+// The 60s timeout covers the debug/ASAN child: 512 pipelines plus a full GC
+// per RSS sample outlive the default per-test timeout there.
+test("errored pipeline releases the compression coder eagerly", async () => {
+  const src = `
+      const N = 512, WARM = 64;
+      const rss = () => { Bun.gc(true); return process.memoryUsage().rss; };
+      async function run() {
+        let n = 0;
+        const source = new ReadableStream({
+          pull(c) {
+            n++;
+            if (n > 5) throw new Error("source failed");
+            c.enqueue(new Uint8Array(8192).fill(n));
+          },
+        });
+        try {
+          await new Response(source.pipeThrough(new CompressionStream("gzip"))).arrayBuffer();
+        } catch (error) {
+          if (error instanceof Error && error.message === "source failed") return;
+          throw error;
+        }
+        throw new Error("expected the pipeline to reject with the source error");
+      }
+      for (let i = 0; i < WARM; i++) await run();
+      const before = rss();
+      for (let i = WARM; i < N; i++) await run();
+      console.log(JSON.stringify({ deltaMiB: (rss() - before) / 1048576 }));
+    `;
+
+  await using proc = Bun.spawn({
+    cmd: [bunExe(), "-e", src],
+    env: {
+      ...bunEnv,
+      // Under ASAN the freed contexts land in the allocator quarantine
+      // (default quarantine_size_mb=256) instead of being returned, so the
+      // RSS delta over-reports by far more than the retention this guards
+      // against even when nothing leaks.
+      ASAN_OPTIONS: [bunEnv.ASAN_OPTIONS, "quarantine_size_mb=0"].filter(Boolean).join(":"),
+    },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+
+  expect(stderr).toBe("");
+  const { deltaMiB } = JSON.parse(stdout.trim());
+  // 448 retained gzip contexts measure ~130 MiB (bun 1.3.14, whose
+  // node:zlib-backed implementation freed them only via finalizer); eager
+  // release measures 7 MiB release / 8 MiB debug+ASAN.
+  expect(deltaMiB).toBeLessThan(64);
+  expect(exitCode).toBe(0);
+}, 60_000);
+
+// Chunks > 128 KiB run the codec on a WorkPool thread. VM teardown
+// (Heap::lastChanceToFinalize) runs the cell's CFinalizer even while that
+// transform is mid-flight — it must release the cell's reference, not free
+// the coder under the pool thread (heap-use-after-free in the brotli encoder,
+// caught by ASAN). BUN_DESTRUCT_VM_ON_EXIT=1 (which CI's test runner sets)
+// makes process.exit() take that teardown path on the main thread. ASAN-only:
+// without ASAN the stray write into freed pages is not reliably observable.
+// The 30s timeout covers the debug/ASAN child's startup plus teardown.
+test.skipIf(!isASAN)(
+  "process.exit during an in-flight off-thread transform does not free the coder under the pool thread",
+  async () => {
+    const src = `
+      const s = new CompressionStream("brotli");
+      const w = s.writable.getWriter();
+      const big = new Uint8Array(6 << 20);
+      for (let i = 0; i < big.length; i += 3) big[i] = (i * 2654435761) >>> 24;
+      w.write(big).catch(() => {});
+      w.close().catch(() => {});
+      s.readable.getReader().read().catch(() => {});
+      // One macrotask turn so the write's transform step has dispatched to the
+      // pool; the 6 MiB brotli step runs for seconds, so exit lands mid-flight.
+      setTimeout(() => {
+        console.log("exiting");
+        process.exit(0);
+      }, 15);
+    `;
+    await using proc = Bun.spawn({
+      cmd: [bunExe(), "-e", src],
+      env: {
+        ...bunEnv,
+        BUN_DESTRUCT_VM_ON_EXIT: "1",
+        // Exiting mid-transform deliberately abandons the in-flight task (and
+        // the coder reference it holds); LSAN would report that bounded leak.
+        ASAN_OPTIONS: [bunEnv.ASAN_OPTIONS, "detect_leaks=0"].filter(Boolean).join(":"),
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+
+    expect(stderr).not.toContain("AddressSanitizer");
+    expect(stdout).toContain("exiting");
+    expect(exitCode).toBe(0);
+  },
+  30_000,
+);
