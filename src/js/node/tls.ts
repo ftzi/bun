@@ -1220,6 +1220,9 @@ function Server(options, secureConnectionListener): void {
     if (typeof hostname !== "string") {
       throw new TypeError("hostname must be a string");
     }
+    if (hostname === "") {
+      throw $ERR_TLS_REQUIRED_SERVER_NAME('"servername" is required parameter for Server.addContext');
+    }
     if (!(context instanceof InternalSecureContext)) {
       context = new InternalSecureContext(context, true);
     }

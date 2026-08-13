@@ -19,14 +19,40 @@ const agent2Key = load("agent2-key.pem");
 const agent3Cert = load("agent3-cert.pem");
 const agent3Key = load("agent3-key.pem");
 const ca1 = load("ca1-cert.pem");
+// agent1's key and certificate as a PKCS#12 bundle (passphrase "sample").
+const agent1Pfx = readFileSync(join(import.meta.dir, "..", "test", "fixtures", "keys", "agent1.pfx"));
 
-async function peerCN(port: number, servername?: string) {
-  const socket = tls.connect({ host: "127.0.0.1", port, servername, rejectUnauthorized: false });
+async function peerCN(port: number, servername?: string, extra: tls.ConnectionOptions = {}) {
+  const socket = tls.connect({ host: "127.0.0.1", port, servername, rejectUnauthorized: false, ...extra });
   const errored = once(socket, "error");
   await Promise.race([once(socket, "secureConnect"), errored.then(([e]) => Promise.reject(e))]);
   const cert = socket.getPeerCertificate();
   socket.destroy();
   return cert.subject?.CN;
+}
+
+// peerCN() that resolves with the error code when the handshake is refused.
+// Deliberately not `expect().rejects`: its nested event loop spin currently segfaults on Windows.
+async function handshakeOutcome(port: number, extra: tls.ConnectionOptions) {
+  try {
+    return { cn: await peerCN(port, undefined, extra) };
+  } catch (err) {
+    return { code: (err as NodeJS.ErrnoException).code };
+  }
+}
+
+// Resolves with the server certificate's CN when a request round-trips, or with
+// the error code when the server refuses the client (at the handshake or, for
+// TLS 1.3 client-certificate failures, right after it).
+async function requestOutcome(port: number, extra: https.RequestOptions = {}) {
+  const { promise, resolve } = Promise.withResolvers<{ cn: string | undefined } | { code: string }>();
+  https
+    .get({ host: "127.0.0.1", port, rejectUnauthorized: false, agent: false, ...extra }, res => {
+      res.resume();
+      resolve({ cn: (res.socket as tls.TLSSocket).getPeerCertificate().subject?.CN });
+    })
+    .on("error", (err: NodeJS.ErrnoException) => resolve({ code: err.code ?? err.message }));
+  return promise;
 }
 
 // `agent: false` so every call opens a fresh connection and therefore a fresh
@@ -223,6 +249,37 @@ describe("https.Server", () => {
     }
   });
 
+  test("addContext rejects an empty hostname before and after listen", async () => {
+    const server = https.createServer({ key: agent2Key, cert: agent2Cert });
+    try {
+      const requiredServerName = '"servername" is required parameter for Server.addContext';
+      expect(() => server.addContext("", { key: agent1Key, cert: agent1Cert })).toThrow(requiredServerName);
+      // The rejected call must not have queued anything that breaks listen().
+      const port = await listen(server);
+      expect(await peerCN(port)).toBe("agent2");
+      expect(() => server.addContext("", { key: agent1Key, cert: agent1Cert })).toThrow(requiredServerName);
+      expect(await peerCN(port)).toBe("agent2");
+    } finally {
+      server.close();
+    }
+  });
+
+  test("addContext accepts the same options as the constructor (pfx) before and after listen", async () => {
+    const server = https.createServer({ key: agent2Key, cert: agent2Cert });
+    try {
+      server.addContext("a.example.com", { pfx: agent1Pfx, passphrase: "sample" });
+      const port = await listen(server);
+      server.addContext("b.example.com", { pfx: agent1Pfx, passphrase: "sample" });
+      expect({
+        a: await peerCN(port, "a.example.com"),
+        b: await peerCN(port, "b.example.com"),
+        other: await peerCN(port, "c.example.com"),
+      }).toEqual({ a: "agent1", b: "agent1", other: "agent2" });
+    } finally {
+      server.close();
+    }
+  });
+
   test("setSecureContext replaces the default context before listen", async () => {
     const server = https.createServer({ key: agent2Key, cert: agent2Cert }, (req, res) => {
       res.writeHead(200);
@@ -264,6 +321,64 @@ describe("https.Server", () => {
       server.setSecureContext({ key: agent1Key, cert: agent1Cert, ca: ca1 });
       const port = await listen(server);
       expect(await peerCN(port)).toBe("agent1");
+    } finally {
+      server.close();
+    }
+  });
+
+  test("setSecureContext accepts the same options as the constructor (pfx, minVersion)", async () => {
+    const server = https.createServer({ key: agent2Key, cert: agent2Cert });
+    try {
+      server.setSecureContext({ pfx: agent1Pfx, passphrase: "sample", minVersion: "TLSv1.3" });
+      const port = await listen(server);
+      expect(await peerCN(port)).toBe("agent1");
+      expect(await handshakeOutcome(port, { maxVersion: "TLSv1.2" })).toEqual({
+        code: "ERR_SSL_TLSV1_ALERT_PROTOCOL_VERSION",
+      });
+    } finally {
+      server.close();
+    }
+  });
+
+  test("setSecureContext clears options the constructor had set but the new call omits", async () => {
+    const server = https.createServer({ key: agent2Key, cert: agent2Cert, minVersion: "TLSv1.3" });
+    try {
+      server.setSecureContext({ key: agent3Key, cert: agent3Cert });
+      const port = await listen(server);
+      expect(await peerCN(port, undefined, { maxVersion: "TLSv1.2" })).toBe("agent3");
+    } finally {
+      server.close();
+    }
+  });
+
+  test("setSecureContext rejects an unknown secureProtocol and applies nothing", async () => {
+    const server = https.createServer({ key: agent2Key, cert: agent2Cert });
+    try {
+      expect(() =>
+        server.setSecureContext({ key: agent3Key, cert: agent3Cert, secureProtocol: "bogus_method" }),
+      ).toThrow(
+        expect.objectContaining({ code: "ERR_TLS_INVALID_PROTOCOL_METHOD", message: "Unknown method: bogus_method" }),
+      );
+      const port = await listen(server);
+      expect(await peerCN(port)).toBe("agent2");
+    } finally {
+      server.close();
+    }
+  });
+
+  test("setSecureContext keeps the client certificate policy the server was created with", async () => {
+    const server = https.createServer(
+      { key: agent2Key, cert: agent2Cert, ca: ca1, requestCert: true, rejectUnauthorized: true },
+      (req, res) => res.end("ok"),
+    );
+    try {
+      // Like Node, requestCert/rejectUnauthorized are server settings; swapping
+      // the certificate (with a call that does not mention them) keeps them.
+      server.setSecureContext({ key: agent3Key, cert: agent3Cert, ca: ca1 });
+      const port = await listen(server);
+      // agent1 is issued by ca1, so it is the one client the server accepts.
+      expect(await requestOutcome(port, { key: agent1Key, cert: agent1Cert })).toEqual({ cn: "agent3" });
+      expect(await requestOutcome(port)).toEqual({ code: expect.stringMatching(/^ERR_SSL_|^ECONNRESET$/) });
     } finally {
       server.close();
     }
