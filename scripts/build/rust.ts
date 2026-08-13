@@ -71,6 +71,33 @@ export function cargoProfile(cfg: Config): { name: string; subdir: string } {
 }
 
 /**
+ * Whether the ninja build should force `-fuse-ld=lld` into the Rust target
+ * crates' link (via `CARGO_ENCODED_RUSTFLAGS`). Centralized so `emitRust` and
+ * the regression test share one source of truth.
+ *
+ *   - Windows: never — the per-target linker is `link.exe` / `lld-link.exe`,
+ *     which take `/X` args, not the GCC/clang `-fuse-ld=`.
+ *   - darwin: only under cross-language LTO. Native macOS links go through
+ *     Apple's ld (the C++ link passes `-Wl,-ld_new`, not `--ld-path=` —
+ *     flags.ts), and a Homebrew `clang++` with no `ld64.lld` it can find
+ *     rejects `-fuse-ld=lld` outright ("invalid linker name in argument
+ *     '-fuse-ld=lld'"), breaking `bun run rust:check` on contributors' macs
+ *     (#30870; `cargo-config.ts` drops the flag from the darwin sections of
+ *     `.cargo/config.toml` for the same reason). Under cross-lang LTO the
+ *     flag stays so a rustc-driven bitcode link goes through the LTO-aware
+ *     lld our final link uses — on darwin that is the cross link from linux,
+ *     where the toolchain's ld64.lld is what `--ld-path=` points at anyway.
+ *   - linux / freebsd / android: always — the default `cc` driver picks BFD
+ *     `/usr/bin/ld`, which doesn't match the semantics the C/C++ object set
+ *     assumes (and under `-Clinker-plugin-lto` doesn't understand `-plugin-opt`).
+ */
+export function rustForcesFuseLdLld(cfg: Config): boolean {
+  if (cfg.windows) return false;
+  if (cfg.darwin) return cfg.crossLangLto;
+  return true;
+}
+
+/**
  * All target triples CI builds. Exposed so `rust:check-all` can iterate
  * `cargo check --target <t>` without re-deriving the list.
  */
@@ -542,15 +569,17 @@ export function cargoBuildInvocation(cfg: Config): CargoInvocation {
   // `cfg.lto`, with the non-LTO build relying on `.cargo/config.toml`'s
   // `rustflags`; but `CARGO_ENCODED_RUSTFLAGS` (always set below) *replaces*
   // the config-file `rustflags` rather than merging, so the config entry was
-  // dead for any ninja build. Push it unconditionally so the ninja build's
-  // behavior doesn't depend on the generated `.cargo/config.toml` at all.
+  // dead for any ninja build. Push it here so the ninja build's behavior
+  // doesn't depend on the generated `.cargo/config.toml` at all.
   //
-  // Not on Windows: the per-target linker there is `link.exe` / `lld-link.exe`
-  // (see `CARGO_TARGET_*_LINKER` below), which take `/X` args, not the GCC/clang
-  // `-fuse-ld=`. RUSTFLAGS only reach *target* crates when `--target` is given,
-  // and the `bun_bin` staticlib has no link step, so it's normally dead — but
-  // if a target cdylib ever appears it'd fail with "could not open '-fuse-ld=lld'".
-  if (!cfg.windows) rustflags.push(`-Clink-arg=-fuse-ld=lld`);
+  // `rustForcesFuseLdLld()` owns the per-platform decision: windows never
+  // (its linker takes `/X` args, not the GCC/clang `-fuse-ld=`); darwin only
+  // under cross-lang LTO (macOS defaults to ld64 and a Homebrew clang++ may
+  // reject the flag, #30870); linux/freebsd/android always. RUSTFLAGS only
+  // reach *target* crates when `--target` is given, and the `bun_bin`
+  // staticlib has no link step, so it's normally dead — but if a target
+  // cdylib ever appears it'd fail with "could not open '-fuse-ld=lld'".
+  if (rustForcesFuseLdLld(cfg)) rustflags.push(`-Clink-arg=-fuse-ld=lld`);
   // Keep the clang driver quiet about link args that don't apply to a given
   // artifact kind: rustc adds `-no-pie` under `-Crelocation-model=static`,
   // which is meaningless when it links a target cdylib, and rustc's
@@ -586,8 +615,9 @@ export function cargoBuildInvocation(cfg: Config): CargoInvocation {
     // Every LTO platform now links ThinLTO with the C/C++ side passing
     // -fno-split-lto-unit (index-based WPD, no hybrid split), so every C/C++
     // module (ours and the WebKit -lto prebuilts) says 0. rustc's default is
-    // also 0, so pass nothing. (`-Clink-arg=-fuse-ld=lld` is pushed
-    // unconditionally above — under LTO it doubles as making rustc's bitcode
+    // also 0, so pass nothing. (`-Clink-arg=-fuse-ld=lld` comes from
+    // `rustForcesFuseLdLld()` above, which under cross-lang LTO is true on
+    // every platform but windows — there it doubles as making rustc's bitcode
     // link go through the LTO-aware linker our final link uses, not BFD
     // `/usr/bin/ld`.)
     if (!cfg.darwin && !cfg.windows) {
@@ -632,9 +662,10 @@ export function cargoBuildInvocation(cfg: Config): CargoInvocation {
     // (build scripts, proc-macros) — and on a native build, `--target` is the
     // host triple, so this env var sets *their* linker too.
     //
-    // Non-Windows: `cfg.cxx` (clang++) drives lld with the same flag dialect
-    // the C++ side uses. `-Clink-arg=-fuse-ld=lld` (pushed into rustflags
-    // below) selects lld for any rustc-driven cdylib link.
+    // Non-Windows: `cfg.cxx` (clang++) is the driver. Whether it drives lld
+    // depends on `rustForcesFuseLdLld(cfg)` above — true on linux/freebsd/
+    // android, and on darwin only under cross-lang LTO; otherwise the driver
+    // picks its default linker (ld64 on darwin).
     //
     // Windows: rustc's `*-msvc` linker flavor passes `link.exe`-style args
     // directly (`/NOLOGO`, `/OUT:`, `/NATVIS:`, `/PDBALTPATH:`, …). `clang-cl`
