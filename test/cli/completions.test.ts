@@ -276,8 +276,17 @@ describe.skipIf(isWindows)("shell completions: `bun <path>` and runtime flags (#
       expect(await complete("bun src/index.ts src/")).toContain("src/other.ts");
       expect(await complete("bun src/index.ts prev-arg src/")).toContain("src/other.ts");
 
-      // Package-manager subcommands do not take file arguments.
-      for (const line of ["bun add src/", "bun link src/", "bun outdated src/"]) {
+      // Package-manager subcommands, under any of their accepted spellings, do
+      // not take file arguments.
+      for (const line of [
+        "bun add src/",
+        "bun a src/",
+        "bun i src/",
+        "bun rm src/",
+        "bun c src/",
+        "bun link src/",
+        "bun outdated src/",
+      ]) {
         expect(await complete(line), `line: ${JSON.stringify(line)}`).not.toContain("src/index.ts");
       }
     },

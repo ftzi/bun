@@ -37,9 +37,10 @@ set -l bun_install_boolean_flags_descriptions "Write a yarn.lock file (yarn v1)"
 
 set -l bun_builtin_cmds_without_run dev create help bun upgrade discord install remove add update init pm x repl
 set -l bun_builtin_cmds_accepting_flags create help bun upgrade discord run init link unlink pm x update
-# Subcommands whose arguments are never file paths. Anything else in the first
-# position (`run`, `test`, `build`, or a script/file being executed) takes files.
-set -l bun_cmds_without_file_args $bun_builtin_cmds_without_run link unlink outdated publish patch info audit exec
+# Subcommands (and their aliases, as accepted by `bun <word>`) whose arguments
+# are never file paths. Anything else in the first position (`run`, `test`,
+# `build`, or a script/file being executed) takes files.
+set -l bun_cmds_without_file_args $bun_builtin_cmds_without_run i ci a r rm uninstall c link unlink outdated publish patch info audit exec why whoami list completions
 
 function __bun_first_positional -d "Print the first non-flag word after bun, skipping values of known arg-taking runtime flags"
     set -l skip 0
